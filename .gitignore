@@ -36,6 +36,9 @@ ENV/
 # Logs
 *.log
 
+# Environment variables
+.env
+
 # Temp files
 temp/
 *.tmp

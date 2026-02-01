@@ -45,13 +45,31 @@ sudo apt update && sudo apt install ffmpeg
 
 ### 3. 配置阿里云百炼 API
 
-编辑 `video_subtitle.py`，设置你的 API Key：
+**方式一：使用 .env 文件（推荐）**
 
-```python
-BAILIAN_API_KEY: str = "sk-xxxxxxxxxxxxxxxx"
+1. 复制示例文件：
+```bash
+cp .env.example .env
+```
+
+2. 编辑 `.env` 文件，填入你的 API Key：
+```bash
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
+**方式二：使用环境变量**
+
+```bash
+# Windows PowerShell
+$env:DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxx"
+
+# Linux/Mac
+export DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxx"
 ```
 
 获取 API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
+
+> ⚠️ **注意**：`.env` 文件已添加到 `.gitignore`，不会被提交到 Git，请放心使用。
 
 ### 4. 运行程序
 

@@ -9,6 +9,9 @@ requests>=2.31.0
 # 进度条（可选，用于更好的显示体验）
 tqdm>=4.66.0
 
+# 环境变量管理
+python-dotenv>=1.0.0
+
 # 以下依赖通常已随 faster-whisper 安装，如遇到问题可手动安装：
 # torch>=2.0.0
 # numpy>=1.24.0

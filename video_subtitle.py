@@ -29,6 +29,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import tempfile
 
+# 加载环境变量
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 未安装时跳过
+
 # 设置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -46,7 +53,8 @@ logger = logging.getLogger(__name__)
 class Config:
     """配置类"""
     # === 阿里云百炼配置 ===
-    BAILIAN_API_KEY: str = "sk-d60df65ab33046f08a4af5a8bef9cacd"
+    # 从环境变量读取，如未设置则使用占位符
+    BAILIAN_API_KEY: str = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", "YOUR_API_KEY_HERE"))
     BAILIAN_MODEL: str = "qwen-mt-flash"
     API_RATE_LIMIT: float = 0.2
     
@@ -474,7 +482,7 @@ class SubtitleTranslator:
         self.last_request_time = 0
         self.cache = TranslationCache(config.CACHE_DB_PATH) if config.ENABLE_CACHE else None
         
-        if config.BAILIAN_API_KEY == "YOUR_BAILIAN_API_KEY":
+        if config.BAILIAN_API_KEY in ("YOUR_API_KEY_HERE", "", None):
             logger.warning("警告: 请设置有效的阿里云百炼 API Key")
     
     def _rate_limit(self):
