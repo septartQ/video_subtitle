@@ -23,13 +23,20 @@
 ```bash
 pip install -r requirements.txt
 ```
+**如果你使用uv管理包，运行下面的命令**
+```bash
+# 安装依赖（二选一）
+uv pip install -e .           # 从 pyproject.toml 安装
+# 或
+uv pip install -r requirements.txt  # 从 requirements.txt 安装
+```
+
 
 ### 2. 安装 FFmpeg
-
 **Windows**:
 ```powershell
 choco install ffmpeg
-# 或
+# 或（choco是全局安装，scoop是非全局安装）
 scoop install ffmpeg
 ```
 
