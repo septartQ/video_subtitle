@@ -249,27 +249,61 @@ python video_subtitle.py input.mp4 --no-cache
 ## 完整配置示例
 
 ```python
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+
 @dataclass
 class Config:
-    # 阿里云百炼
-    BAILIAN_API_KEY: str = "your-api-key"
-    BAILIAN_MODEL: str = "qwen-turbo"  # 或 qwen-plus, qwen-max
-    API_RATE_LIMIT: float = 0.2
+    """配置类"""
+    # === 阿里云百炼配置 ===
+    # 从环境变量读取，如未设置则使用占位符
+    BAILIAN_API_KEY: str = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", "YOUR_API_KEY_HERE"))
+    BAILIAN_MODEL: str = "qwen-mt-flash"  # 或 qwen-turbo, qwen-plus, qwen-max
+    API_RATE_LIMIT: float = 0.2  # 请求间隔（秒）
     
-    # 翻译批量
-    TRANSLATION_BATCH_SIZE: int = 30
+    # === 翻译切片配置 ===
+    TRANSLATION_BATCH_SIZE: int = 30  # 每批翻译行数
     
-    # Whisper
-    WHISPER_MODEL: str = "large-v3"
-    DEVICE: str = "cuda"
-    COMPUTE_TYPE: str = "float16"
+    # === Whisper 配置 ===
+    WHISPER_MODEL: str = "large-v3"  # 可选: tiny, base, small, medium, large-v1/v2/v3
+    DEVICE: str = "cuda"  # 或 cpu
+    COMPUTE_TYPE: str = "float16"  # CPU 模式自动切换为 int8
+    USE_VAD: bool = True  # 启用语音活动检测
+    VAD_PARAMETERS: dict = field(default_factory=lambda: {
+        "min_silence_duration_ms": 500,
+        "max_speech_duration_s": 30,
+    })
+    SOURCE_LANGUAGE: Optional[str] = None  # 源语言代码，None 为自动检测
     
-    # 音频分段处理
-    AUDIO_SEGMENT_MINUTES: int = 30    # 音频分段
+    # === 音频分段处理配置 ===
+    AUDIO_SEGMENT_MINUTES: int = 30  # 超过此长度分段处理
     
-    # 缓存
+    # === 翻译缓存配置 ===
     ENABLE_CACHE: bool = True
     CACHE_DB_PATH: str = "./temp/translation_cache.db"
+    
+    # === 字幕配置 ===
+    SUBTITLE_STYLE: str = (
+        "FontName=微软雅黑,"
+        "FontSize=24,"
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,"
+        "BackColour=&H00000000,"
+        "Bold=1,"
+        "Outline=2,"
+        "Shadow=0,"
+        "Alignment=2"
+    )
+    SUBTITLE_MARGIN_V: int = 30  # 字幕底部边距
+    
+    # === 输出配置 ===
+    VIDEO_CODEC: str = "h264_nvenc"  # 或 libx264（CPU 模式自动切换）
+    VIDEO_CRF: int = 23  # 质量参数（越小质量越高，文件越大）
+    AUDIO_CODEC: str = "aac"
+    AUDIO_BITRATE: str = "192k"
+    TEMP_DIR: str = "./temp"  # 临时文件目录
+    KEEP_TEMP: bool = False  # 是否保留临时文件
 ```
 
 ## 输出文件
