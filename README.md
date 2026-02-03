@@ -12,23 +12,69 @@
 
 ## 环境要求
 
-- Python 3.8+
+- Python 3.12（推荐，项目指定版本）
+- uv 或 pip（包管理器）
 - NVIDIA GPU（推荐，用于 CUDA 加速）
 - FFmpeg
+
+### 安装 uv（可选但推荐）
+
+```bash
+# Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Linux/Mac
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+验证安装：
+```bash
+uv --version
+```
 
 ## 快速开始
 
 ### 1. 安装依赖
 
+本项目支持使用 **uv**（推荐）或 **pip** 管理依赖。
+
+#### 方式一：使用 uv（推荐）
+
+[uv](https://github.com/astral-sh/uv) 是一个极速的 Python 包管理器，比 pip 快 10-100 倍。
+
 ```bash
-pip install -r requirements.txt
-```
-**如果你使用uv管理包，运行下面的命令**
-```bash
+# 创建虚拟环境（自动使用项目指定的 Python 版本）
+uv venv
+
+# 激活虚拟环境
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+
 # 安装依赖（二选一）
-uv pip install -e .           # 从 pyproject.toml 安装
+uv pip install -e .           # 从 pyproject.toml 安装（推荐）
 # 或
 uv pip install -r requirements.txt  # 从 requirements.txt 安装
+
+# 或使用 uv run 直接运行（无需手动激活虚拟环境）
+uv run python video_subtitle.py input.mp4
+```
+
+#### 方式二：使用 pip
+
+```bash
+# 创建虚拟环境（可选但推荐）
+python -m venv .venv
+
+# 激活虚拟环境
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+source .venv/bin/activate
+
+# 安装依赖
+pip install -r requirements.txt
 ```
 
 
@@ -93,6 +139,27 @@ python video_subtitle.py --test-api
 
 ### 5. 运行程序
 
+#### 使用 uv（推荐）
+
+```bash
+# 完整流程（自动使用虚拟环境中的依赖）
+uv run python video_subtitle.py input.mp4
+
+# 指定输出路径
+uv run python video_subtitle.py input.mp4 -o output.mp4
+
+# 使用较小的模型（速度更快）
+uv run python video_subtitle.py input.mp4 --model base
+
+# 指定源语言
+uv run python video_subtitle.py input.mp4 --language en
+
+# 测试 API 连通性
+uv run python video_subtitle.py --test-api
+```
+
+#### 使用 pip（需先激活虚拟环境）
+
 ```bash
 # 完整流程
 python video_subtitle.py input.mp4
@@ -105,6 +172,9 @@ python video_subtitle.py input.mp4 --model base
 
 # 指定源语言
 python video_subtitle.py input.mp4 --language en
+
+# 测试 API 连通性
+python video_subtitle.py --test-api
 ```
 
 ## 分段处理配置
@@ -112,7 +182,10 @@ python video_subtitle.py input.mp4 --language en
 ### 音频分段（语音识别）
 
 ```bash
-# 超过 20 分钟的视频分段识别（默认 30 分钟）
+# uv
+uv run python video_subtitle.py input.mp4 --audio-segment 20
+
+# pip
 python video_subtitle.py input.mp4 --audio-segment 20
 ```
 
@@ -129,7 +202,10 @@ python video_subtitle.py input.mp4 --audio-segment 20
 ### 批量大小
 
 ```bash
-# 每 50 行字幕一次翻译请求（默认 30）
+# uv
+uv run python video_subtitle.py input.mp4 --batch-size 50
+
+# pip
 python video_subtitle.py input.mp4 --batch-size 50
 ```
 
@@ -147,7 +223,10 @@ python video_subtitle.py input.mp4 --batch-size 50
 缓存默认启用，存储在 `temp/translation_cache.db`。
 
 ```bash
-# 禁用缓存
+# 禁用缓存（uv）
+uv run python video_subtitle.py input.mp4 --no-cache
+
+# 禁用缓存（pip）
 python video_subtitle.py input.mp4 --no-cache
 ```
 
