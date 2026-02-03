@@ -1103,8 +1103,17 @@ def main():
     if args.language:
         config.SOURCE_LANGUAGE = args.language
     
-    # 检查 CUDA
-    if config.DEVICE == 'cuda':
+    # 检查设备配置
+    if config.DEVICE == 'cpu':
+        # CPU 模式自动使用 int8（CPU 不支持 float16）
+        if config.COMPUTE_TYPE == 'float16':
+            logger.info("CPU 模式自动切换计算类型为 int8")
+            config.COMPUTE_TYPE = 'int8'
+        # CPU 模式下使用软件编码
+        if config.VIDEO_CODEC == 'h264_nvenc':
+            logger.info("CPU 模式自动切换视频编码器为 libx264")
+            config.VIDEO_CODEC = 'libx264'
+    elif config.DEVICE == 'cuda':
         try:
             import torch
             if not torch.cuda.is_available():
