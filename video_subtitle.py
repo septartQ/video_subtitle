@@ -784,12 +784,25 @@ class VideoEmbedder:
     def __init__(self, config: Config):
         self.config = config
 
+    def _parse_time(self, time_str: str) -> float:
+        """将时间字符串转换为秒数"""
+        # 格式: HH:MM:SS.xx 或 MM:SS.xx
+        parts = time_str.split(':')
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        elif len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + float(s)
+        return 0.0
+
     def embed(self, video_path: str, srt_path: str, output_path: str):
-        """将字幕硬嵌入视频"""
+        """将字幕硬嵌入视频（带进度条）"""
         video_size_gb = get_video_size_gb(video_path)
+        duration = get_video_duration(video_path)
         
         logger.info(f"开始嵌入字幕到视频")
-        logger.info(f"输入视频: {video_path} ({video_size_gb:.2f} GB)")
+        logger.info(f"输入视频: {video_path} ({video_size_gb:.2f} GB, {duration:.1f}秒)")
         logger.info(f"字幕文件: {srt_path}")
         logger.info(f"输出视频: {output_path}")
         
@@ -802,7 +815,7 @@ class VideoEmbedder:
         )
         
         cmd = [
-            'ffmpeg', '-y', '-i', video_path,
+            'ffmpeg', '-y', '-progress', 'pipe:1', '-i', video_path,
             '-vf', subtitle_filter,
             '-c:v', self.config.VIDEO_CODEC,
         ]
@@ -821,12 +834,61 @@ class VideoEmbedder:
         cmd.append(output_path)
         
         logger.info("正在编码视频，这可能需要一些时间...")
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
         
-        if result.returncode != 0:
-            raise RuntimeError(f"视频编码失败: {result.stderr}")
+        # 使用 Popen 实时获取进度
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='ignore'
+        )
         
-        logger.info(f"视频嵌入完成: {output_path}")
+        # 解析进度输出
+        current_time = 0.0
+        last_log_time = 0
+        
+        try:
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                
+                line = line.strip()
+                if line.startswith('out_time_ms='):
+                    # 微秒转秒
+                    try:
+                        current_time = int(line.split('=')[1]) / 1000000.0
+                    except (ValueError, IndexError):
+                        continue
+                elif line.startswith('out_time='):
+                    # 直接解析时间字符串
+                    try:
+                        time_str = line.split('=')[1]
+                        current_time = self._parse_time(time_str)
+                    except (ValueError, IndexError):
+                        continue
+                
+                # 每 5 秒输出一次进度（避免日志过多）
+                if duration > 0 and int(current_time) % 5 == 0 and int(current_time) != last_log_time:
+                    progress = min(100.0, (current_time / duration) * 100)
+                    logger.info(f"编码进度: {progress:.1f}% ({current_time:.1f}s / {duration:.1f}s)")
+                    last_log_time = int(current_time)
+            
+            # 等待进程完成
+            process.wait()
+            
+            if process.returncode != 0:
+                stderr = process.stderr.read()
+                raise RuntimeError(f"视频编码失败: {stderr}")
+            
+            logger.info(f"视频嵌入完成: {output_path}")
+            
+        except KeyboardInterrupt:
+            process.terminate()
+            process.wait()
+            raise RuntimeError("用户中断视频编码")
 
 
 # ==================== 主流程 ====================
