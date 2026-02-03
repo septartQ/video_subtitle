@@ -837,6 +837,20 @@ class VideoSubtitlePipeline:
             else:
                 srt_path = result['original_srt']
             
+            # 检查字幕是否为空
+            if srt_path and os.path.exists(srt_path):
+                with open(srt_path, 'r', encoding='utf-8') as f:
+                    srt_content = f.read().strip()
+                if not srt_content:
+                    logger.warning("未识别到任何字幕，直接复制原视频")
+                    if not skip_embedding:
+                        # 复制原视频到输出路径
+                        import shutil
+                        shutil.copy2(video_path, output_path)
+                        logger.info(f"原视频已复制到: {output_path}")
+                    result['success'] = True
+                    return result
+            
             # 步骤 3: 翻译字幕（批量切片）
             if not skip_translation:
                 translated_srt = self.translator.translate_srt(srt_path, video_path)
