@@ -965,6 +965,9 @@ def main():
   # 完整流程
   python video_subtitle.py input.mp4
   
+  # 测试 API 连通性
+  python video_subtitle.py --test-api
+  
   # 指定音频分段长度（长音频转录）
   python video_subtitle.py input.mp4 --audio-segment 20
   
@@ -976,7 +979,7 @@ def main():
         """
     )
     
-    parser.add_argument('video', help='输入视频文件路径')
+    parser.add_argument('video', nargs='?', help='输入视频文件路径（--test-api 模式下可选）')
     parser.add_argument('-o', '--output', help='输出视频文件路径')
     parser.add_argument('--skip-transcription', action='store_true', 
                         help='跳过语音识别')
@@ -1002,23 +1005,23 @@ def main():
     
     args = parser.parse_args()
     
-    # 创建配置
+    # 创建配置（加载 .env 文件中的环境变量）
     config = Config()
     
     # 测试 API 连通性
     if args.test_api:
-        from video_subtitle import SubtitleTranslator
         translator = SubtitleTranslator(config)
         success = translator.test_connection()
         sys.exit(0 if success else 1)
+    
+    # 非测试模式下需要视频文件
+    if not args.video:
+        parser.error("需要指定视频文件路径，或使用 --test-api 测试 API 连通性")
     
     # 检查 ffmpeg
     if not check_ffmpeg():
         print("错误: 未检测到 ffmpeg，请先安装: https://ffmpeg.org/download.html")
         sys.exit(1)
-    
-    # 创建配置
-    config = Config()
     config.WHISPER_MODEL = args.model
     config.DEVICE = args.device
     config.AUDIO_SEGMENT_MINUTES = args.audio_segment
