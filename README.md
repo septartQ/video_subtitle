@@ -79,10 +79,16 @@ pip install -r requirements.txt
 
 
 ### 2. 安装 FFmpeg
-**Windows**:
+
+**Windows（推荐方式）**:
 ```powershell
+# 使用 winget（Windows 自带，无需额外安装）
+winget install Gyan.FFmpeg
+
+# 或使用 Chocolatey
 choco install ffmpeg
-# 或（choco是全局安装，scoop是非全局安装）
+
+# 或使用 Scoop
 scoop install ffmpeg
 ```
 
