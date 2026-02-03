@@ -493,6 +493,71 @@ class SubtitleTranslator:
             time.sleep(sleep_time)
         self.last_request_time = time.time()
     
+    def test_connection(self) -> bool:
+        """测试API连通性"""
+        import requests
+        
+        logger.info("正在测试阿里云百炼 API 连通性...")
+        
+        # 检查API Key
+        if self.config.BAILIAN_API_KEY in ("YOUR_API_KEY_HERE", "", None):
+            logger.error("❌ API Key 未设置")
+            return False
+        
+        self._rate_limit()
+        
+        try:
+            url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+            
+            headers = {
+                "Authorization": f"Bearer {self.config.BAILIAN_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            # 使用简单的测试文本
+            payload = {
+                "model": self.config.BAILIAN_MODEL,
+                "input": {
+                    "messages": [
+                        {"role": "user", "content": "Hello"}
+                    ]
+                },
+                "parameters": {
+                    "result_format": "message",
+                    "max_tokens": 10
+                }
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                logger.info("✅ API 连通性测试通过")
+                return True
+            elif response.status_code == 401:
+                logger.error(f"❌ API Key 无效或已过期 (HTTP {response.status_code})")
+                return False
+            elif response.status_code == 429:
+                logger.warning(f"⚠️ 请求过于频繁 (HTTP {response.status_code})")
+                return False
+            else:
+                logger.error(f"❌ API 请求失败: HTTP {response.status_code}")
+                try:
+                    error_info = response.json()
+                    logger.error(f"错误详情: {error_info}")
+                except:
+                    logger.error(f"响应内容: {response.text[:200]}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.error("❌ 请求超时，请检查网络连接")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ 网络连接错误，请检查网络或代理设置")
+            return False
+        except Exception as e:
+            logger.error(f"❌ 测试失败: {e}")
+            return False
+    
     def translate_batch(self, entries: List[dict]) -> List[str]:
         """批量翻译字幕条目"""
         if not entries:
@@ -932,8 +997,20 @@ def main():
                         help='翻译批量大小（行数，默认: 30）')
     parser.add_argument('--no-cache', action='store_true',
                         help='禁用翻译缓存')
+    parser.add_argument('--test-api', action='store_true',
+                        help='测试 API 连通性（不处理视频）')
     
     args = parser.parse_args()
+    
+    # 创建配置
+    config = Config()
+    
+    # 测试 API 连通性
+    if args.test_api:
+        from video_subtitle import SubtitleTranslator
+        translator = SubtitleTranslator(config)
+        success = translator.test_connection()
+        sys.exit(0 if success else 1)
     
     # 检查 ffmpeg
     if not check_ffmpeg():

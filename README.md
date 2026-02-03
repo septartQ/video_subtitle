@@ -78,7 +78,20 @@ export DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxx"
 
 > ⚠️ **注意**：`.env` 文件已添加到 `.gitignore`，不会被提交到 Git，请放心使用。
 
-### 4. 运行程序
+### 4. 测试 API 连通性（可选）
+
+在正式处理视频前，建议先测试 API 是否配置正确：
+
+```bash
+python video_subtitle.py --test-api
+```
+
+输出示例：
+```
+✅ API 连通性测试通过
+```
+
+### 5. 运行程序
 
 ```bash
 # 完整流程
