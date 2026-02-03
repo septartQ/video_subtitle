@@ -839,55 +839,66 @@ class VideoEmbedder:
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # 将 stderr 重定向到 stdout
             text=True,
             encoding='utf-8',
-            errors='ignore'
+            errors='ignore',
+            bufsize=1,  # 行缓冲
+            universal_newlines=True
         )
         
         # 解析进度输出
         current_time = 0.0
         last_log_time = 0
+        last_progress_log = 0  # 上次记录进度的时间戳
         
         try:
             while True:
                 line = process.stdout.readline()
                 if not line:
-                    break
+                    # 检查进程是否结束
+                    if process.poll() is not None:
+                        break
+                    continue
                 
                 line = line.strip()
+                
+                # 解析 FFmpeg 进度输出
                 if line.startswith('out_time_ms='):
-                    # 微秒转秒
                     try:
                         current_time = int(line.split('=')[1]) / 1000000.0
                     except (ValueError, IndexError):
                         continue
                 elif line.startswith('out_time='):
-                    # 直接解析时间字符串
                     try:
                         time_str = line.split('=')[1]
-                        current_time = self._parse_time(time_str)
+                        if time_str and time_str != 'N/A':
+                            current_time = self._parse_time(time_str)
                     except (ValueError, IndexError):
                         continue
                 
-                # 每 5 秒输出一次进度（避免日志过多）
-                if duration > 0 and int(current_time) % 5 == 0 and int(current_time) != last_log_time:
+                # 每 5 秒输出一次进度（基于实际时间而非视频时间）
+                current_timestamp = time.time()
+                if duration > 0 and (current_timestamp - last_progress_log) >= 5:
                     progress = min(100.0, (current_time / duration) * 100)
                     logger.info(f"编码进度: {progress:.1f}% ({current_time:.1f}s / {duration:.1f}s)")
+                    last_progress_log = current_timestamp
                     last_log_time = int(current_time)
             
             # 等待进程完成
             process.wait()
             
             if process.returncode != 0:
-                stderr = process.stderr.read()
-                raise RuntimeError(f"视频编码失败: {stderr}")
+                raise RuntimeError(f"视频编码失败 (exit code: {process.returncode})")
             
             logger.info(f"视频嵌入完成: {output_path}")
             
         except KeyboardInterrupt:
             process.terminate()
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except:
+                process.kill()
             raise RuntimeError("用户中断视频编码")
 
 
