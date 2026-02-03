@@ -54,5 +54,6 @@ dependencies = [
     "urllib3==2.6.3",
 ]
 
-[tool.uv.pip]
-index-url = "https://download.pytorch.org/whl/cu121"
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cu121"]
+index-strategy = "unsafe-best-match"
