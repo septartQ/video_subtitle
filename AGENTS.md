@@ -3,9 +3,10 @@
 ## 项目概述
 
 这是一个基于 Python 的视频自动字幕生成与翻译工具，能够将视频中的语音转换为字幕，翻译成中文，并嵌入到视频中。项目采用单文件架构，所有核心功能集中在 `video_subtitle.py` 中。
+
 ### 回答规范
 
-你回答用户的问题时必须使用中文，而非其它语言，仅在生产代码时使用英文
+你回答用户的问题时必须使用中文，而非其它语言，仅在生产代码时使用英文。
 
 ### 核心功能
 
@@ -17,111 +18,114 @@
 
 ### 技术栈
 
-- **语言**：Python 3.8+
+- **语言**：Python 3.12+
+- **包管理器**：uv（优先）或 pip
 - **语音识别**：faster-whisper (OpenAI Whisper 的高效实现)
-- **翻译 API**：阿里云百炼 (Bailian)
+- **翻译 API**：阿里云百炼 (Bailian/DashScope)
 - **音视频处理**：FFmpeg
 - **缓存**：SQLite3
-- **依赖管理**：pip + requirements.txt
+- **依赖管理**：pyproject.toml + requirements.txt
 
 ## 项目结构
 
 ```
 project1/
-├── video_subtitle.py      # 主程序文件，包含所有核心逻辑
-├── requirements.txt       # Python 依赖
-├── README.md              # 项目使用文档（中文）
-├── FAQ.md                 # 常见问题（Kimi Code CLI 相关）
-├── MCP.md                 # MCP 协议文档（Kimi Code CLI 相关）
-├── 斜杠命令.md             # 斜杠命令文档（Kimi Code CLI 相关）
-├── video_subtitle.log     # 运行日志
-├── temp/                  # 临时文件目录
-│   ├── translation_cache.db    # 翻译缓存数据库
+├── video_subtitle.py      # 主程序文件，包含所有核心逻辑（约 978 行）
+├── pyproject.toml         # Python 项目配置（uv/pip 安装入口）
+├── requirements.txt       # Python 依赖列表
+├── uv.lock               # uv 包管理器锁定文件
+├── .env.example          # 环境变量示例文件
+├── .env                  # 实际环境变量（已加入 .gitignore）
+├── .python-version       # Python 版本指定（3.12）
+├── README.md             # 项目使用文档（中文）
+├── LICENSE               # MIT 许可证
+├── AGENTS.md             # 本文件
+├── video_subtitle.log    # 运行日志
+├── temp/                 # 临时文件目录
+│   ├── translation_cache.db    # 翻译缓存数据库（SQLite）
 │   ├── models/                 # Whisper 模型下载目录
 │   ├── *_original.srt          # 原始语言字幕
 │   ├── *_translated.srt        # 翻译后的中文字幕
 │   └── *_audio_seg*.wav        # 分段音频文件（临时）
-├── out/                   # 输出目录（可配置）
-└── __pycache__/           # Python 字节码缓存
+├── .venv/                # 虚拟环境（已加入 .gitignore）
+├── __pycache__/          # Python 字节码缓存
+└── *.egg-info/           # 包元数据目录
 ```
 
-## 核心类架构
+## 依赖管理
 
-### Config (配置类)
+项目使用双重依赖管理方式：
 
-位于文件顶部的 `@dataclass` 装饰的类，集中管理所有配置：
+### 方式一：使用 uv（推荐）
 
-```python
-@dataclass
-class Config:
-    BAILIAN_API_KEY: str          # 阿里云百炼 API 密钥
-    BAILIAN_MODEL: str            # 翻译模型，默认 "qwen-mt-flash"
-    TRANSLATION_BATCH_SIZE: int   # 每批翻译行数，默认 30
-    WHISPER_MODEL: str            # Whisper 模型，默认 "large-v3"
-    DEVICE: str                   # 计算设备，默认 "cuda"
-    COMPUTE_TYPE: str             # 计算类型，默认 "float16"
-    AUDIO_SEGMENT_MINUTES: int    # 音频分段长度，默认 30 分钟
-    ENABLE_CACHE: bool            # 是否启用缓存，默认 True
+项目配置了 `pyproject.toml` 和 `uv.lock`，支持 uv 包管理器：
+
+```bash
+# 安装依赖（从 pyproject.toml）
+uv pip install -e .
+
+# 或从 requirements.txt
+uv pip install -r requirements.txt
+
+# 锁定依赖版本
+uv lock
 ```
 
-### TranslationCache (翻译缓存)
+**Python 版本要求**：3.12（见 `.python-version` 和 `pyproject.toml` 中的 `requires-python`）
 
-基于 SQLite 的线程安全缓存实现：
-- 使用 MD5 hash 作为缓存键
-- 按模型名称区分缓存
-- 支持线程本地连接
-- 表结构：`text_hash`, `source_text`, `translated_text`, `model`, `created_at`
-
-### AudioExtractor (音频提取器)
-
-支持分段音频提取：
-- 短视频直接提取为单文件
-- 长视频自动分段（按 `AUDIO_SEGMENT_MINUTES` 配置）
-- 输出 16kHz 单声道 WAV 格式
-
-### SubtitleGenerator (字幕生成器)
-
-Whisper 模型封装：
-- 延迟加载模型（首次使用时加载）
-- 支持 VAD（语音活动检测）
-- 多段音频时间戳自动合并
-- 输出 SRT 格式字幕
-
-### SubtitleTranslator (字幕翻译器)
-
-批量翻译实现：
-- 支持缓存查询和写入
-- 批量翻译（默认 30 行/次）
-- 行数不匹配时自动回退到逐条翻译
-- API 频率限制保护
-
-### VideoEmbedder (视频嵌入器)
-
-FFmpeg 字幕嵌入：
-- 使用 `subtitles` 滤镜硬编码字幕
-- 支持 NVENC 硬件编码（h264_nvenc）
-- 可配置字幕样式（字体、大小、颜色等）
-
-### VideoSubtitlePipeline (主流程)
-
- Orchestrates 完整处理流程：
-1. 提取音频（支持分段）
-2. 生成字幕（Whisper 识别）
-3. 翻译字幕（批量+缓存）
-4. 嵌入视频（FFmpeg 编码）
-
-## 运行命令
-
-### 安装依赖
+### 方式二：使用 pip
 
 ```bash
 pip install -r requirements.txt
 ```
 
-依赖列表：
-- `faster-whisper>=1.0.0` - 语音识别
-- `requests>=2.31.0` - HTTP 请求
-- `tqdm>=4.66.0` - 进度条（可选）
+### 关键依赖
+
+| 包名 | 版本 | 用途 |
+|------|------|------|
+| faster-whisper | 1.2.1 | 语音识别 |
+| torch | 2.5.1+cu121 | PyTorch (CUDA 12.1) |
+| requests | 2.32.5 | HTTP 请求（翻译 API） |
+| onnxruntime | 1.23.2 | ONNX 运行时 |
+| ctranslate2 | 4.6.3 | 翻译加速 |
+| pandas | 3.0.0 | 数据处理 |
+| tqdm | 4.67.1 | 进度条 |
+
+## 环境配置
+
+### 必需：配置阿里云百炼 API Key
+
+**方式一：使用 .env 文件（推荐）**
+
+1. 复制示例文件：
+```bash
+cp .env.example .env
+```
+
+2. 编辑 `.env` 文件：
+```bash
+DASHSCOPE_API_KEY=sk-your-actual-api-key-here
+```
+
+**方式二：使用环境变量**
+
+```bash
+# Windows PowerShell
+$env:DASHSCOPE_API_KEY="sk-your-api-key"
+
+# Linux/Mac
+export DASHSCOPE_API_KEY="sk-your-api-key"
+```
+
+> ⚠️ **安全注意**：`.env` 文件已加入 `.gitignore`，不会被提交到 Git。
+
+获取 API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
+
+### 可选：CUDA 配置
+
+项目默认使用 CUDA 加速（`DEVICE = "cuda"`）。如果 CUDA 不可用，程序会自动降级到 CPU 模式。
+
+## 构建与运行命令
 
 ### 系统要求
 
@@ -130,7 +134,7 @@ pip install -r requirements.txt
   - macOS: `brew install ffmpeg`
   - Linux: `sudo apt install ffmpeg`
 - **NVIDIA GPU**（推荐）：用于 CUDA 加速
-- **Python**：3.8 或更高版本
+- **Python**：3.12（由 `.python-version` 指定）
 
 ### 运行程序
 
@@ -147,15 +151,16 @@ python video_subtitle.py input.mp4 --model base
 # 指定源语言（如英语）
 python video_subtitle.py input.mp4 --language en
 
-# 调整音频分段长度（解决显存不足）
+# 调整音频分段长度（解决显存不足，默认 30 分钟）
 python video_subtitle.py input.mp4 --audio-segment 15
 
-# 调整翻译批量大小（解决 tokens 超限）
+# 调整翻译批量大小（解决 tokens 超限，默认 30 行）
 python video_subtitle.py input.mp4 --batch-size 20
 
 # 跳过某些步骤
 python video_subtitle.py input.mp4 --skip-translation  # 只生成原文字幕
 python video_subtitle.py input.mp4 --skip-embedding    # 不嵌入视频
+python video_subtitle.py input.mp4 --skip-transcription # 使用已有字幕
 
 # 禁用翻译缓存
 python video_subtitle.py input.mp4 --no-cache
@@ -170,31 +175,87 @@ Whisper 模型大小选项：
 - `medium` - 较好
 - `large-v1/v2/v3` - 最佳精度（默认 v3）
 
-## 配置说明
+## 代码架构
 
-### API 密钥配置
+### 核心类架构
 
-**必须修改** `video_subtitle.py` 中的以下配置：
+```
+Config (数据类)
+├── 翻译配置（API Key、模型、批量大小）
+├── Whisper 配置（模型、设备、计算类型）
+├── 音频分段配置
+├── 缓存配置
+└── 字幕/视频编码配置
+
+TranslationCache (翻译缓存管理器)
+├── SQLite 数据库操作
+├── MD5 hash 键值存储
+└── 线程安全连接管理
+
+AudioExtractor (音频提取器)
+├── 短视频直接提取
+└── 长视频分段提取（按 AUDIO_SEGMENT_MINUTES）
+
+SubtitleGenerator (字幕生成器)
+├── Whisper 模型延迟加载
+├── VAD 语音活动检测
+├── 多段音频时间戳合并
+└── SRT 格式输出
+
+SubtitleTranslator (字幕翻译器)
+├── 缓存查询和写入
+├── 批量翻译（默认 30 行/次）
+├── 行数不匹配时逐条翻译回退
+└── API 频率限制保护
+
+VideoEmbedder (视频嵌入器)
+├── FFmpeg 字幕硬编码
+├── NVENC 硬件编码支持
+└── 可配置字幕样式
+
+VideoSubtitlePipeline (主流程编排)
+├── 提取音频
+├── 生成字幕
+├── 翻译字幕
+└── 嵌入视频
+```
+
+### 关键配置项（Config 类）
 
 ```python
 @dataclass
 class Config:
-    BAILIAN_API_KEY: str = "your-api-key-here"  # 替换为实际密钥
+    # 阿里云百炼
+    BAILIAN_API_KEY: str          # 从 DASHSCOPE_API_KEY 环境变量读取
+    BAILIAN_MODEL: str = "qwen-mt-flash"
+    API_RATE_LIMIT: float = 0.2   # 请求间隔（秒）
+    
+    # 翻译批量
+    TRANSLATION_BATCH_SIZE: int = 30
+    
+    # Whisper
+    WHISPER_MODEL: str = "large-v3"
+    DEVICE: str = "cuda"
+    COMPUTE_TYPE: str = "float16"
+    USE_VAD: bool = True
+    
+    # 音频分段处理
+    AUDIO_SEGMENT_MINUTES: int = 30
+    
+    # 缓存
+    ENABLE_CACHE: bool = True
+    CACHE_DB_PATH: str = "./temp/translation_cache.db"
+    
+    # 字幕样式
+    SUBTITLE_STYLE: str = "FontName=微软雅黑,..."
+    SUBTITLE_MARGIN_V: int = 30
+    
+    # 视频编码
+    VIDEO_CODEC: str = "h264_nvenc"  # 或 libx264
+    VIDEO_CRF: int = 23
+    AUDIO_CODEC: str = "aac"
+    AUDIO_BITRATE: str = "192k"
 ```
-
-获取 API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
-
-### 性能调优
-
-**显存不足时**：
-- 减小 `--audio-segment`（建议 15-20）
-- 使用更小模型（如 `small` 或 `base`）
-- 修改 `COMPUTE_TYPE = "int8"`
-- 使用 `--device cpu`
-
-**翻译质量优化**：
-- 使用更好的模型：`BAILIAN_MODEL = "qwen-max"`
-- 修改 `TRANSLATION_PROMPT` 添加领域特定要求
 
 ## 代码风格指南
 
@@ -215,14 +276,16 @@ def translate_batch(self, entries: List[dict]) -> List[str]:
 
 ### 日志记录
 
-使用标准库 `logging`：
+使用标准库 `logging`，配置在模块级别：
 ```python
 logger.info(f"处理完成: {file_path}")
 logger.warning(f"缓存查询失败: {e}")
 logger.error(f"处理失败: {e}")
 ```
 
-日志同时输出到控制台和 `video_subtitle.log` 文件。
+日志同时输出到：
+- 控制台（StreamHandler）
+- `video_subtitle.log` 文件（FileHandler，UTF-8 编码）
 
 ### 异常处理
 
@@ -236,6 +299,28 @@ except Exception as e:
     logger.error(f"错误: {e}")
     raise
 ```
+
+### 环境变量加载
+
+使用 `python-dotenv` 加载 `.env` 文件（如果安装）：
+```python
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+```
+
+## 测试策略
+
+项目目前**没有自动化测试**，测试依赖：
+
+1. **手动测试**：运行实际视频文件验证流程
+2. **日志检查**：检查 `video_subtitle.log` 中的错误信息
+3. **分段验证**：
+   - 小文件测试（< 5分钟）
+   - 中等文件测试（10-30分钟）
+   - 大文件测试（> 1小时）
 
 ## 输出文件
 
@@ -258,39 +343,63 @@ temp/
 - 按模型名称区分缓存
 - 缓存永久有效（手动删除数据库文件可清空）
 
+**表结构**：
+```sql
+CREATE TABLE translations (
+    text_hash TEXT PRIMARY KEY,
+    source_text TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
 清空缓存：
 ```bash
 rm temp/translation_cache.db
 ```
 
-## 测试策略
-
-项目目前**没有自动化测试**，测试依赖：
-
-1. **手动测试**：运行实际视频文件验证流程
-2. **日志检查**：检查 `video_subtitle.log` 中的错误信息
-3. **分段验证**：
-   - 小文件测试（< 5分钟）
-   - 中等文件测试（10-30分钟）
-   - 大文件测试（> 1小时）
-
 ## 安全注意事项
 
-1. **API 密钥**：`BAILIAN_API_KEY` 不应提交到版本控制
-2. **文件路径**：使用 `os.path.abspath` 和 `Path` 处理路径
-3. **命令注入**：FFmpeg 命令参数已转义处理
-4. **线程安全**：SQLite 连接使用 `threading.local()`
+1. **API 密钥**：
+   - `DASHSCOPE_API_KEY` 存储在 `.env` 文件，已加入 `.gitignore`
+   - 代码中通过 `os.getenv("DASHSCOPE_API_KEY")` 读取
+   - 绝不要硬编码真实 API Key 到代码中
+
+2. **文件路径**：
+   - 使用 `os.path.abspath` 转换为绝对路径
+   - 使用 `pathlib.Path` 处理路径操作
+
+3. **命令注入**：
+   - FFmpeg 命令参数已转义处理（`srt_path.replace('\\', '/').replace(':', '\\:')`）
+   - 使用列表形式传递命令参数，避免 shell 注入
+
+4. **线程安全**：
+   - SQLite 连接使用 `threading.local()` 实现线程本地存储
 
 ## 故障排查
 
 ### CUDA 内存不足
-```python
+```bash
 # 减小分段长度
-config.AUDIO_SEGMENT_MINUTES = 15
+python video_subtitle.py input.mp4 --audio-segment 15
+
 # 使用更小模型
-config.WHISPER_MODEL = "small"
-# 降低精度
-config.COMPUTE_TYPE = "int8"
+python video_subtitle.py input.mp4 --model small
+
+# 切换到 CPU
+python video_subtitle.py input.mp4 --device cpu
+```
+
+代码中也会自动检测 CUDA 可用性并降级：
+```python
+if config.DEVICE == 'cuda':
+    import torch
+    if not torch.cuda.is_available():
+        logger.warning("CUDA 不可用，自动切换到 CPU 模式")
+        config.DEVICE = 'cpu'
+        config.COMPUTE_TYPE = 'int8'
+        config.VIDEO_CODEC = 'libx264'
 ```
 
 ### 翻译行数不匹配
@@ -302,6 +411,24 @@ config.COMPUTE_TYPE = "int8"
 ## 开发注意事项
 
 1. **单文件架构**：所有功能在一个文件中，新增功能应遵循现有类结构
+
 2. **依赖延迟加载**：如 `faster_whisper` 和 `requests` 在使用时导入，非模块级别
-3. **临时文件清理**：音频临时文件自动清理，字幕文件保留供用户查看
-4. **模型下载**：Whisper 模型首次使用自动下载到 `temp/models/`
+   ```python
+   def load_model(self):
+       from faster_whisper import WhisperModel
+       ...
+   ```
+
+3. **临时文件清理**：
+   - 音频临时文件在字幕生成后自动清理
+   - 字幕文件保留供用户查看
+   - 可通过 `config.KEEP_TEMP = True` 保留临时文件
+
+4. **模型下载**：
+   - Whisper 模型首次使用自动下载到 `temp/models/`
+   - 下载进度会显示在控制台
+
+5. **API 响应格式**：
+   - 阿里云百炼 API 支持两种响应格式：
+     - `result["output"]["choices"][0]["message"]["content"]`
+     - `result["output"]["text"]`
