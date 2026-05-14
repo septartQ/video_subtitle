@@ -839,7 +839,7 @@ class VideoEmbedder:
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # 将 stderr 重定向到 stdout
+            stderr=subprocess.PIPE,
             text=True,
             encoding='utf-8',
             errors='ignore',
@@ -851,6 +851,18 @@ class VideoEmbedder:
         current_time = 0.0
         last_log_time = 0
         last_progress_log = 0  # 上次记录进度的时间戳
+        stderr_lines = []  # 收集 stderr 用于出错时排查
+        
+        def read_stderr():
+            """后台读取 stderr"""
+            while process.poll() is None:
+                line = process.stderr.readline()
+                if line:
+                    stderr_lines.append(line)
+        
+        import threading
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
         
         try:
             while True:
@@ -887,8 +899,12 @@ class VideoEmbedder:
             
             # 等待进程完成
             process.wait()
+            stderr_thread.join(timeout=2)
             
             if process.returncode != 0:
+                stderr_output = ''.join(stderr_lines[-20:])  # 最后20行
+                if stderr_output.strip():
+                    logger.error(f"FFmpeg 错误输出:\n{stderr_output.strip()}")
                 raise RuntimeError(f"视频编码失败 (exit code: {process.returncode})")
             
             logger.info(f"视频嵌入完成: {output_path}")

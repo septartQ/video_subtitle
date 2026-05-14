@@ -390,3 +390,6 @@ rm temp/translation_cache.db
 ## 许可证
 
 MIT License
+
+
+python video_subtitle.py svdvd-921.mp4 -o svdvd-921-fy.mp4 --model medium --language ja --device cuda

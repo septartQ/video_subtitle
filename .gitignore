@@ -49,3 +49,5 @@ Thumbs.db
 
 # claude
 .claude
+
+*.mp4
