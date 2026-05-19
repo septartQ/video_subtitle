@@ -52,10 +52,25 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     """配置类"""
+    # === 翻译平台配置 ===
+    # 翻译平台: bailian / siliconflow / deepseek
+    TRANSLATION_PROVIDER: str = field(default_factory=lambda: os.getenv("TRANSLATION_PROVIDER", "bailian"))
+
     # === 阿里云百炼配置 ===
     # 从环境变量读取，如未设置则使用占位符
     BAILIAN_API_KEY: str = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", "YOUR_API_KEY_HERE"))
     BAILIAN_MODEL: str = "qwen-mt-flash"
+
+    # === 硅基流动配置 ===
+    SILICONFLOW_API_KEY: str = field(default_factory=lambda: os.getenv("SILICONFLOW_API_KEY", "YOUR_API_KEY_HERE"))
+    SILICONFLOW_MODEL: str = field(default_factory=lambda: os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
+    SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
+
+    # === DeepSeek 配置 ===
+    DEEPSEEK_API_KEY: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", "YOUR_API_KEY_HERE"))
+    DEEPSEEK_MODEL: str = field(default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+
     API_RATE_LIMIT: float = 0.2
     
     # === 翻译切片配置 ===
@@ -123,6 +138,230 @@ class Config:
 {text}
 
 请只返回翻译后的文本（每行一个）："""
+
+
+# ==================== 翻译平台 Provider ====================
+
+from abc import ABC, abstractmethod
+
+class TranslationProvider(ABC):
+    """翻译平台抽象基类"""
+
+    @abstractmethod
+    def chat(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
+        """调用 API 翻译，返回翻译文本"""
+        pass
+
+    @abstractmethod
+    def test_connection(self) -> bool:
+        """测试 API 连通性"""
+        pass
+
+    @abstractmethod
+    def get_model(self) -> str:
+        """获取当前使用的模型名"""
+        pass
+
+    @abstractmethod
+    def get_name(self) -> str:
+        """获取平台名称（日志用）"""
+        pass
+
+
+class BailianProvider(TranslationProvider):
+    """阿里云百炼（DashScope）翻译 Provider"""
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.api_key = config.BAILIAN_API_KEY
+        self.model = config.BAILIAN_MODEL
+        self.url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+
+    def get_model(self) -> str:
+        return self.model
+
+    def get_name(self) -> str:
+        return "阿里云百炼"
+
+    def test_connection(self) -> bool:
+        import requests
+
+        logger.info("正在测试阿里云百炼 API 连通性...")
+
+        if self.api_key in ("YOUR_API_KEY_HERE", "", None):
+            logger.error("❌ API Key 未设置")
+            return False
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            payload = {
+                "model": self.model,
+                "input": {
+                    "messages": [{"role": "user", "content": "Hello"}]
+                },
+                "parameters": {
+                    "result_format": "message",
+                    "max_tokens": 10
+                }
+            }
+
+            response = requests.post(self.url, headers=headers, json=payload, timeout=30)
+
+            if response.status_code == 200:
+                logger.info("✅ API 连通性测试通过")
+                return True
+            elif response.status_code == 401:
+                logger.error(f"❌ API Key 无效或已过期 (HTTP {response.status_code})")
+                return False
+            elif response.status_code == 429:
+                logger.warning(f"⚠️ 请求过于频繁 (HTTP {response.status_code})")
+                return False
+            else:
+                logger.error(f"❌ API 请求失败: HTTP {response.status_code}")
+                try:
+                    error_info = response.json()
+                    logger.error(f"错误详情: {error_info}")
+                except Exception:
+                    logger.error(f"响应内容: {response.text[:200]}")
+                return False
+
+        except requests.exceptions.Timeout:
+            logger.error("❌ 请求超时，请检查网络连接")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ 网络连接错误，请检查网络或代理设置")
+            return False
+        except Exception as e:
+            logger.error(f"❌ 测试失败: {e}")
+            return False
+
+    def chat(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
+        import requests
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": self.model,
+            "input": {
+                "messages": messages
+            },
+            "parameters": {
+                "result_format": "message",
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
+        }
+
+        response = requests.post(self.url, headers=headers, json=payload, timeout=120)
+
+        if response.status_code == 200:
+            result = response.json()
+            if "output" in result and "choices" in result["output"]:
+                return result["output"]["choices"][0]["message"]["content"]
+            elif "output" in result and "text" in result["output"]:
+                return result["output"]["text"]
+
+        raise RuntimeError(f"API 错误: HTTP {response.status_code} - {response.text[:200]}")
+
+
+class OpenAICompatProvider(TranslationProvider):
+    """OpenAI 兼容 API Provider（硅基流动、DeepSeek 等）"""
+
+    def __init__(self, config: Config, name: str, api_key: str, model: str, base_url: str):
+        self.config = config
+        self._name = name
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url.rstrip('/')
+        self.url = f"{self.base_url}/chat/completions"
+
+    def get_model(self) -> str:
+        return self.model
+
+    def get_name(self) -> str:
+        return self._name
+
+    def test_connection(self) -> bool:
+        import requests
+
+        logger.info(f"正在测试 {self._name} API 连通性...")
+
+        if self.api_key in ("YOUR_API_KEY_HERE", "", None):
+            logger.error(f"❌ {self._name} API Key 未设置")
+            return False
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 10
+            }
+
+            response = requests.post(self.url, headers=headers, json=payload, timeout=30)
+
+            if response.status_code == 200:
+                logger.info(f"✅ {self._name} API 连通性测试通过")
+                return True
+            elif response.status_code == 401:
+                logger.error(f"❌ {self._name} API Key 无效或已过期 (HTTP {response.status_code})")
+                return False
+            elif response.status_code == 429:
+                logger.warning(f"⚠️ 请求过于频繁 (HTTP {response.status_code})")
+                return False
+            else:
+                logger.error(f"❌ API 请求失败: HTTP {response.status_code}")
+                try:
+                    error_info = response.json()
+                    logger.error(f"错误详情: {error_info}")
+                except Exception:
+                    logger.error(f"响应内容: {response.text[:200]}")
+                return False
+
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ 请求超时，请检查网络连接")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.error(f"❌ 网络连接错误，请检查网络或代理设置")
+            return False
+        except Exception as e:
+            logger.error(f"❌ 测试失败: {e}")
+            return False
+
+    def chat(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
+        import requests
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        response = requests.post(self.url, headers=headers, json=payload, timeout=120)
+
+        if response.status_code == 200:
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0:
+                return result["choices"][0]["message"]["content"]
+
+        raise RuntimeError(f"API 错误: HTTP {response.status_code} - {response.text[:200]}")
 
 
 # ==================== 翻译缓存管理器 ====================
@@ -475,16 +714,36 @@ class SubtitleGenerator:
 
 
 class SubtitleTranslator:
-    """字幕翻译器（支持批量切片和缓存）"""
-    
+    """字幕翻译器（支持批量切片、缓存和多平台）"""
+
     def __init__(self, config: Config):
         self.config = config
         self.last_request_time = 0
         self.cache = TranslationCache(config.CACHE_DB_PATH) if config.ENABLE_CACHE else None
-        
-        if config.BAILIAN_API_KEY in ("YOUR_API_KEY_HERE", "", None):
-            logger.warning("警告: 请设置有效的阿里云百炼 API Key")
-    
+
+        provider_name = config.TRANSLATION_PROVIDER.lower()
+        if provider_name == "siliconflow":
+            self.provider = OpenAICompatProvider(
+                config, "硅基流动",
+                config.SILICONFLOW_API_KEY,
+                config.SILICONFLOW_MODEL,
+                config.SILICONFLOW_BASE_URL
+            )
+        elif provider_name == "deepseek":
+            self.provider = OpenAICompatProvider(
+                config, "DeepSeek",
+                config.DEEPSEEK_API_KEY,
+                config.DEEPSEEK_MODEL,
+                config.DEEPSEEK_BASE_URL
+            )
+        else:
+            self.provider = BailianProvider(config)
+
+        self.model = self.provider.get_model()
+
+        if self.provider.api_key in ("YOUR_API_KEY_HERE", "", None):
+            logger.warning(f"警告: 请设置有效的 {self.provider.get_name()} API Key")
+
     def _rate_limit(self):
         """频率限制"""
         elapsed = time.time() - self.last_request_time
@@ -492,272 +751,140 @@ class SubtitleTranslator:
             sleep_time = self.config.API_RATE_LIMIT - elapsed
             time.sleep(sleep_time)
         self.last_request_time = time.time()
-    
+
     def test_connection(self) -> bool:
         """测试API连通性"""
-        import requests
-        
-        logger.info("正在测试阿里云百炼 API 连通性...")
-        
-        # 检查API Key
-        if self.config.BAILIAN_API_KEY in ("YOUR_API_KEY_HERE", "", None):
-            logger.error("❌ API Key 未设置")
-            return False
-        
         self._rate_limit()
-        
-        try:
-            url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-            
-            headers = {
-                "Authorization": f"Bearer {self.config.BAILIAN_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            # 使用简单的测试文本
-            payload = {
-                "model": self.config.BAILIAN_MODEL,
-                "input": {
-                    "messages": [
-                        {"role": "user", "content": "Hello"}
-                    ]
-                },
-                "parameters": {
-                    "result_format": "message",
-                    "max_tokens": 10
-                }
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            
-            if response.status_code == 200:
-                logger.info("✅ API 连通性测试通过")
-                return True
-            elif response.status_code == 401:
-                logger.error(f"❌ API Key 无效或已过期 (HTTP {response.status_code})")
-                return False
-            elif response.status_code == 429:
-                logger.warning(f"⚠️ 请求过于频繁 (HTTP {response.status_code})")
-                return False
-            else:
-                logger.error(f"❌ API 请求失败: HTTP {response.status_code}")
-                try:
-                    error_info = response.json()
-                    logger.error(f"错误详情: {error_info}")
-                except:
-                    logger.error(f"响应内容: {response.text[:200]}")
-                return False
-                
-        except requests.exceptions.Timeout:
-            logger.error("❌ 请求超时，请检查网络连接")
-            return False
-        except requests.exceptions.ConnectionError:
-            logger.error("❌ 网络连接错误，请检查网络或代理设置")
-            return False
-        except Exception as e:
-            logger.error(f"❌ 测试失败: {e}")
-            return False
-    
+        return self.provider.test_connection()
+
     def translate_batch(self, entries: List[dict]) -> List[str]:
         """批量翻译字幕条目"""
         if not entries:
             return []
-        
+
         # 检查缓存
         if self.cache:
             cached_results = []
             need_translate = []
             for entry in entries:
-                cached = self.cache.get(entry['text'], self.config.BAILIAN_MODEL)
+                cached = self.cache.get(entry['text'], self.model)
                 if cached:
                     cached_results.append((entry['index'], cached))
                 else:
                     need_translate.append(entry)
-            
+
             if cached_results:
                 logger.debug(f"缓存命中 {len(cached_results)}/{len(entries)} 条")
-            
+
             if not need_translate:
-                # 全部命中缓存
                 cached_results.sort(key=lambda x: x[0])
                 return [text for _, text in cached_results]
-            
+
             entries = need_translate
-        
-        # 构建批量翻译文本
-        # 格式: "index|text" 方便后续对应
+
         batch_text = "\n".join([f"{e['index']}|{e['text']}" for e in entries])
-        
+        prompt = self.config.TRANSLATION_PROMPT.format(text=batch_text)
+
         self._rate_limit()
-        
+
         try:
-            import requests
-            
-            url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-            
-            headers = {
-                "Authorization": f"Bearer {self.config.BAILIAN_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            prompt = self.config.TRANSLATION_PROMPT.format(text=batch_text)
-            
-            payload = {
-                "model": self.config.BAILIAN_MODEL,
-                "input": {
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ]
-                },
-                "parameters": {
-                    "result_format": "message",
-                    "max_tokens": 4000,  # 批量翻译需要更多 tokens
-                    "temperature": 0.3
-                }
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                # 解析响应
-                translated_text = ""
-                if "output" in result and "choices" in result["output"]:
-                    translated_text = result["output"]["choices"][0]["message"]["content"]
-                elif "output" in result and "text" in result["output"]:
-                    translated_text = result["output"]["text"]
-                
-                # 分割翻译结果
-                translated_lines = [line.strip() for line in translated_text.strip().split('\n') if line.strip()]
-                
-                # 确保行数匹配
-                if len(translated_lines) != len(entries):
-                    logger.warning(f"翻译行数不匹配: 输入{len(entries)}行，输出{len(translated_lines)}行，将使用逐条翻译")
-                    return self._translate_one_by_one(entries)
-                
-                # 存入缓存
-                if self.cache:
-                    for entry, translated in zip(entries, translated_lines):
-                        self.cache.set(entry['text'], translated, self.config.BAILIAN_MODEL)
-                
-                # 合并缓存结果和新翻译结果
-                if self.cache:
-                    all_results = cached_results + [(e['index'], t) for e, t in zip(entries, translated_lines)]
-                    all_results.sort(key=lambda x: x[0])
-                    return [text for _, text in all_results]
-                
-                return translated_lines
-            else:
-                logger.error(f"API 错误: {response.status_code} - {response.text}")
+            translated_text = self.provider.chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=4000,
+                temperature=0.3
+            )
+
+            translated_lines = [line.strip() for line in translated_text.strip().split('\n') if line.strip()]
+
+            if len(translated_lines) != len(entries):
+                logger.warning(f"翻译行数不匹配: 输入{len(entries)}行，输出{len(translated_lines)}行，将使用逐条翻译")
                 return self._translate_one_by_one(entries)
-                
+
+            if self.cache:
+                for entry, translated in zip(entries, translated_lines):
+                    self.cache.set(entry['text'], translated, self.model)
+
+            if self.cache:
+                all_results = cached_results + [(e['index'], t) for e, t in zip(entries, translated_lines)]
+                all_results.sort(key=lambda x: x[0])
+                return [text for _, text in all_results]
+
+            return translated_lines
+
         except Exception as e:
             logger.error(f"批量翻译失败: {e}")
             return self._translate_one_by_one(entries)
-    
+
     def _translate_one_by_one(self, entries: List[dict]) -> List[str]:
         """逐条翻译（备用方案）"""
         results = []
         for entry in entries:
             if self.cache:
-                cached = self.cache.get(entry['text'], self.config.BAILIAN_MODEL)
+                cached = self.cache.get(entry['text'], self.model)
                 if cached:
                     results.append(cached)
                     continue
-            
+
             translated = self._translate_single(entry['text'])
             if self.cache:
-                self.cache.set(entry['text'], translated, self.config.BAILIAN_MODEL)
+                self.cache.set(entry['text'], translated, self.model)
             results.append(translated)
         return results
-    
+
     def _translate_single(self, text: str) -> str:
         """翻译单条文本"""
         if not text.strip():
             return ""
-        
+
         self._rate_limit()
-        
+
         try:
-            import requests
-            
-            url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-            
-            headers = {
-                "Authorization": f"Bearer {self.config.BAILIAN_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
             prompt = f"将以下文本翻译成中文，只返回翻译结果:\n{text}"
-            
-            payload = {
-                "model": self.config.BAILIAN_MODEL,
-                "input": {
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ]
-                },
-                "parameters": {
-                    "result_format": "message",
-                    "max_tokens": 500,
-                    "temperature": 0.3
-                }
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if "output" in result and "choices" in result["output"]:
-                    return result["output"]["choices"][0]["message"]["content"].strip()
-                elif "output" in result and "text" in result["output"]:
-                    return result["output"]["text"].strip()
-            
-            return text
-            
+            return self.provider.chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=500,
+                temperature=0.3
+            ).strip()
         except Exception as e:
             logger.error(f"翻译失败: {e}")
             return text
-    
+
     def translate_srt(self, srt_path: str, video_path: str) -> str:
         """翻译整个 SRT 文件（切片处理）"""
         video_name = Path(video_path).stem
         translated_path = os.path.join(
-            self.config.TEMP_DIR, 
+            self.config.TEMP_DIR,
             f"{video_name}_translated.srt"
         )
-        
+
         logger.info(f"开始翻译字幕: {srt_path}")
-        logger.info(f"使用模型: {self.config.BAILIAN_MODEL}")
+        logger.info(f"翻译平台: {self.provider.get_name()}")
+        logger.info(f"使用模型: {self.model}")
         logger.info(f"批量大小: {self.config.TRANSLATION_BATCH_SIZE} 行/次")
-        
-        # 读取原始字幕
+
         with open(srt_path, 'r', encoding='utf-8') as f:
             srt_content = f.read()
-        
+
         entries = parse_srt(srt_content)
         total = len(entries)
         logger.info(f"共 {total} 条字幕需要翻译")
-        
-        # 显示缓存统计
+
         if self.cache:
             stats = self.cache.get_stats()
             logger.info(f"缓存统计: {stats.get('total_entries', 0)} 条历史记录")
-        
-        # 分批翻译
+
         translated_entries = []
         batch_size = self.config.TRANSLATION_BATCH_SIZE
-        
+
         for i in range(0, total, batch_size):
             batch = entries[i:i+batch_size]
             batch_num = i // batch_size + 1
             total_batches = (total + batch_size - 1) // batch_size
-            
+
             logger.info(f"翻译批次 {batch_num}/{total_batches} (条目 {i+1}-{min(i+batch_size, total)})")
-            
+
             translated_texts = self.translate_batch(batch)
-            
+
             for entry, translated in zip(batch, translated_texts):
                 translated_entries.append({
                     'index': entry['index'],
@@ -765,15 +892,13 @@ class SubtitleTranslator:
                     'end': entry['end'],
                     'text': translated
                 })
-        
-        # 写入翻译后的字幕
+
         write_srt(translated_entries, translated_path)
-        
-        # 显示最终缓存统计
+
         if self.cache:
             stats = self.cache.get_stats()
             logger.info(f"翻译完成！缓存共 {stats.get('total_entries', 0)} 条记录")
-        
+
         logger.info(f"翻译完成: {translated_path}")
         return translated_path
 
@@ -1091,6 +1216,9 @@ def main():
                         help='禁用翻译缓存')
     parser.add_argument('--test-api', action='store_true',
                         help='测试 API 连通性（不处理视频）')
+    parser.add_argument('--provider', default='bailian',
+                        choices=['bailian', 'siliconflow', 'deepseek'],
+                        help='翻译平台（默认: bailian）')
     
     args = parser.parse_args()
     
@@ -1115,6 +1243,7 @@ def main():
     config.DEVICE = args.device
     config.AUDIO_SEGMENT_MINUTES = args.audio_segment
     config.TRANSLATION_BATCH_SIZE = args.batch_size
+    config.TRANSLATION_PROVIDER = args.provider
     config.ENABLE_CACHE = not args.no_cache
     if args.language:
         config.SOURCE_LANGUAGE = args.language

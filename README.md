@@ -1,14 +1,15 @@
 # 视频自动字幕生成与翻译工具
 
-一个完整的视频字幕处理工具，支持**长视频分段处理**、**批量翻译**和**翻译缓存**。
+一个完整的视频字幕处理工具，支持**长视频分段处理**、**多平台翻译**和**翻译缓存**。
 
 ## 功能特点
 
 1. **语音识别**：使用 faster-whisper 进行高精度语音识别，支持 CUDA 加速
 2. **长视频分段**：超长音频自动分段识别，避免 CUDA OOM
-3. **批量翻译**：每 30 行字幕一次请求，避免 tokens 过多
-4. **翻译缓存**：SQLite 缓存，相同内容只翻译一次
-5. **字幕嵌入**：使用 FFmpeg 将字幕硬编码到视频中
+3. **多平台翻译**：支持阿里云百炼、硅基流动、DeepSeek 等翻译平台
+4. **批量翻译**：每 30 行字幕一次请求，避免 tokens 过多
+5. **翻译缓存**：SQLite 缓存，相同内容只翻译一次（按模型隔离）
+6. **字幕嵌入**：使用 FFmpeg 将字幕硬编码到视频中
 
 ## 环境要求
 
@@ -102,18 +103,64 @@ brew install ffmpeg
 sudo apt update && sudo apt install ffmpeg
 ```
 
-### 3. 配置阿里云百炼 API
+### 3. 配置翻译平台 API
+
+选择以下任一平台，获取 API Key 并填入 `.env` 文件。
+
+#### 阿里云百炼（默认）
+
+获取 API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
+
+```bash
+# .env
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
+使用：
+```bash
+python video_subtitle.py input.mp4                    # 默认
+python video_subtitle.py input.mp4 --provider bailian
+```
+
+#### 硅基流动
+
+获取 API Key: https://cloud.siliconflow.cn/account/ak
+
+```bash
+# .env
+SILICONFLOW_API_KEY=sk-xxxxxxxxxxxxxxxx
+# 可选：覆盖默认模型
+# SILICONFLOW_MODEL=Qwen/Qwen2.5-7B-Instruct
+```
+
+使用：
+```bash
+python video_subtitle.py input.mp4 --provider siliconflow
+```
+
+#### DeepSeek
+
+获取 API Key: https://platform.deepseek.com/api_keys
+
+```bash
+# .env
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+# 可选：覆盖默认模型
+# DEEPSEEK_MODEL=deepseek-chat
+```
+
+使用：
+```bash
+python video_subtitle.py input.mp4 --provider deepseek
+```
+
+#### 配置方式
 
 **方式一：使用 .env 文件（推荐）**
 
-1. 复制示例文件：
 ```bash
 cp .env.example .env
-```
-
-2. 编辑 `.env` 文件，填入你的 API Key：
-```bash
-DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+# 编辑 .env 填入你选择平台的 API Key
 ```
 
 **方式二：使用环境变量**
@@ -126,16 +173,14 @@ $env:DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxx"
 export DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxx"
 ```
 
-获取 API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
-
-> ⚠️ **注意**：`.env` 文件已添加到 `.gitignore`，不会被提交到 Git，请放心使用。
+> ⚠️ **注意**：`.env` 文件已添加到 `.gitignore`，不会被提交到 Git。
 
 ### 4. 测试 API 连通性（可选）
 
-在正式处理视频前，建议先测试 API 是否配置正确：
-
 ```bash
-python video_subtitle.py --test-api
+python video_subtitle.py --test-api                          # 测试默认平台（百炼）
+python video_subtitle.py --test-api --provider siliconflow   # 测试硅基流动
+python video_subtitle.py --test-api --provider deepseek      # 测试 DeepSeek
 ```
 
 输出示例：
@@ -148,8 +193,14 @@ python video_subtitle.py --test-api
 #### 使用 uv（推荐）
 
 ```bash
-# 完整流程（自动使用虚拟环境中的依赖）
+# 完整流程
 uv run python video_subtitle.py input.mp4
+
+# 使用硅基流动翻译
+uv run python video_subtitle.py input.mp4 --provider siliconflow
+
+# 使用 DeepSeek 翻译
+uv run python video_subtitle.py input.mp4 --provider deepseek
 
 # 指定输出路径
 uv run python video_subtitle.py input.mp4 -o output.mp4
@@ -169,6 +220,12 @@ uv run python video_subtitle.py --test-api
 ```bash
 # 完整流程
 python video_subtitle.py input.mp4
+
+# 使用硅基流动翻译
+python video_subtitle.py input.mp4 --provider siliconflow
+
+# 使用 DeepSeek 翻译
+python video_subtitle.py input.mp4 --provider deepseek
 
 # 指定输出路径
 python video_subtitle.py input.mp4 -o output.mp4
@@ -204,6 +261,24 @@ python video_subtitle.py input.mp4 --audio-segment 20
 - 显存充足（> 12GB）：可保持 30 分钟或更大
 
 ## 翻译配置
+
+### 翻译平台
+
+```bash
+python video_subtitle.py input.mp4 --provider siliconflow
+```
+
+| 平台 | `--provider` 值 | 默认模型 | 环境变量 |
+|------|----------------|---------|----------|
+| 阿里云百炼 | `bailian`（默认） | `qwen-mt-flash` | `DASHSCOPE_API_KEY` |
+| 硅基流动 | `siliconflow` | `Qwen/Qwen2.5-7B-Instruct` | `SILICONFLOW_API_KEY` |
+| DeepSeek | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+
+也可通过环境变量设置：
+```bash
+# .env
+TRANSLATION_PROVIDER=deepseek
+```
 
 ### 批量大小
 
@@ -256,10 +331,23 @@ from typing import Optional
 @dataclass
 class Config:
     """配置类"""
+    # === 翻译平台配置 ===
+    TRANSLATION_PROVIDER: str = "bailian"  # bailian / siliconflow / deepseek
+    
     # === 阿里云百炼配置 ===
-    # 从环境变量读取，如未设置则使用占位符
     BAILIAN_API_KEY: str = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", "YOUR_API_KEY_HERE"))
-    BAILIAN_MODEL: str = "qwen-mt-flash"  # 或 qwen-turbo, qwen-plus, qwen-max
+    BAILIAN_MODEL: str = "qwen-mt-flash"
+    
+    # === 硅基流动配置 ===
+    SILICONFLOW_API_KEY: str = field(default_factory=lambda: os.getenv("SILICONFLOW_API_KEY", "YOUR_API_KEY_HERE"))
+    SILICONFLOW_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
+    SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
+    
+    # === DeepSeek 配置 ===
+    DEEPSEEK_API_KEY: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", "YOUR_API_KEY_HERE"))
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    
     API_RATE_LIMIT: float = 0.2  # 请求间隔（秒）
     
     # === 翻译切片配置 ===
@@ -343,7 +431,8 @@ print(torch.cuda.get_device_name(0))
 
 ### Q: 如何提高翻译质量？
 
-- 使用更好的模型：`BAILIAN_MODEL = "qwen-max"`
+- 尝试不同的翻译平台：`--provider deepseek` 或 `--provider siliconflow`
+- 使用更好的模型：修改对应平台的 MODEL 环境变量
 - 修改 `TRANSLATION_PROMPT` 添加领域特定要求
 
 ### Q: 缓存占用空间太大？
@@ -390,6 +479,3 @@ rm temp/translation_cache.db
 ## 许可证
 
 MIT License
-
-
-python video_subtitle.py svdvd-921.mp4 -o svdvd-921-fy.mp4 --model medium --language ja --device cuda
