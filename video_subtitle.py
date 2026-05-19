@@ -4,37 +4,35 @@
 视频自动字幕生成与翻译工具（支持长视频分段处理）
 功能：
 1. 从视频提取音频并生成SRT字幕（支持 CUDA 加速，长视频自动分段）
-2. 将字幕批量翻译成中文（切片处理，每30行一次请求）
-3. 将翻译后的字幕硬嵌入视频（大视频分段编码）
+2. 将字幕批量翻译（切片处理，每30行一次请求）
+3. 将翻译后的字幕硬嵌入视频
 4. 翻译结果自动缓存（SQLite）
 
 作者：AI Assistant
-日期：2026-01-30
+日期：2026-05-19
 """
 
 import os
 import sys
 import re
 import time
-import json
 import hashlib
+import shutil
 import sqlite3
 import subprocess
-import warnings
 import threading
+import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import logging
-import tempfile
 
 # 加载环境变量
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # python-dotenv 未安装时跳过
+    pass
 
 # 设置日志
 logging.basicConfig(
@@ -72,6 +70,8 @@ class Config:
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
 
     API_RATE_LIMIT: float = 0.2
+    API_TIMEOUT: int = 120
+    TRANSLATION_TEMPERATURE: float = 0.3
     
     # === 翻译切片配置 ===
     # 每批次翻译的字幕行数（避免 tokens 过多）
@@ -84,10 +84,11 @@ class Config:
     USE_VAD: bool = True
     VAD_PARAMETERS: dict = field(default_factory=lambda: {
         "min_silence_duration_ms": 500,
-        "max_speech_duration_s": 30,
+        "max_speech_duration_s": 15,
     })
     SOURCE_LANGUAGE: Optional[str] = None
-    
+    TARGET_LANGUAGE: str = "中文"
+
     # === 音频分段处理配置 ===
     # 音频分段长度（分钟），超过此长度的视频会分段处理
     AUDIO_SEGMENT_MINUTES: int = 30
@@ -122,11 +123,11 @@ class Config:
     KEEP_TEMP: bool = False
     
     # 翻译提示词模板（批量翻译版本）
-    TRANSLATION_PROMPT: str = """请将以下视频字幕翻译成中文。
+    TRANSLATION_PROMPT: str = """请将以下视频字幕翻译成{target_lang}。
 要求：
-1. 翻译要自然、通顺，符合中文表达习惯
+1. 翻译要自然、通顺，符合{target_lang}的表达习惯
 2. 保持字幕的时间戳不变
-3. 如果原文已经是中文，请直接返回原文
+3. 如果原文已经是{target_lang}，请直接返回原文
 4. 不要添加任何解释或额外内容
 5. 确保翻译后的文本长度适合字幕显示
 6. 必须按照原始格式返回，每行字幕一行翻译
@@ -142,77 +143,73 @@ class Config:
 
 # ==================== 翻译平台 Provider ====================
 
-from abc import ABC, abstractmethod
+_MISSING = object()  # API Key 未设置占位符
+
 
 class TranslationProvider(ABC):
     """翻译平台抽象基类"""
 
+    @property
     @abstractmethod
+    def api_key(self) -> str:
+        pass
+
+    @abstractmethod
+    def get_model(self) -> str:
+        pass
+
+    @abstractmethod
+    def get_name(self) -> str:
+        pass
+
+    @abstractmethod
+    def _build_payload(self, messages: List[Dict], max_tokens: int, temperature: float) -> Dict:
+        """构建请求体"""
+        pass
+
+    @abstractmethod
+    def _parse_response(self, result: Dict) -> str:
+        """从响应中提取翻译文本"""
+        pass
+
+    @abstractmethod
+    def _get_endpoint(self) -> str:
+        """获取 API 端点 URL"""
+        pass
+
+    def _api_post(self, payload: Dict, timeout: int):
+        import requests
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        return requests.post(self._get_endpoint(), headers=headers, json=payload, timeout=timeout)
+
     def chat(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
-        """调用 API 翻译，返回翻译文本"""
-        pass
-
-    @abstractmethod
-    def test_connection(self) -> bool:
-        """测试 API 连通性"""
-        pass
-
-    @abstractmethod
-    def get_model(self) -> str:
-        """获取当前使用的模型名"""
-        pass
-
-    @abstractmethod
-    def get_name(self) -> str:
-        """获取平台名称（日志用）"""
-        pass
-
-
-class BailianProvider(TranslationProvider):
-    """阿里云百炼（DashScope）翻译 Provider"""
-
-    def __init__(self, config: Config):
-        self.config = config
-        self.api_key = config.BAILIAN_API_KEY
-        self.model = config.BAILIAN_MODEL
-        self.url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-
-    def get_model(self) -> str:
-        return self.model
-
-    def get_name(self) -> str:
-        return "阿里云百炼"
+        payload = self._build_payload(messages, max_tokens, temperature)
+        response = self._api_post(payload, timeout=self.config.API_TIMEOUT)
+        if response.status_code == 200:
+            return self._parse_response(response.json())
+        raise RuntimeError(f"API 错误: HTTP {response.status_code}")
 
     def test_connection(self) -> bool:
         import requests
 
-        logger.info("正在测试阿里云百炼 API 连通性...")
+        logger.info(f"正在测试 {self.get_name()} API 连通性...")
 
-        if self.api_key in ("YOUR_API_KEY_HERE", "", None):
-            logger.error("❌ API Key 未设置")
+        if not self.api_key or self.api_key is _MISSING:
+            logger.error(f"❌ {self.get_name()} API Key 未设置")
             return False
 
         try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "model": self.model,
-                "input": {
-                    "messages": [{"role": "user", "content": "Hello"}]
-                },
-                "parameters": {
-                    "result_format": "message",
-                    "max_tokens": 10
-                }
-            }
-
-            response = requests.post(self.url, headers=headers, json=payload, timeout=30)
+            payload = self._build_payload(
+                [{"role": "user", "content": "Hello"}],
+                max_tokens=10, temperature=0
+            )
+            response = self._api_post(payload, timeout=30)
 
             if response.status_code == 200:
-                logger.info("✅ API 连通性测试通过")
+                logger.info(f"✅ 连通性测试通过")
                 return True
             elif response.status_code == 401:
                 logger.error(f"❌ API Key 无效或已过期 (HTTP {response.status_code})")
@@ -222,11 +219,6 @@ class BailianProvider(TranslationProvider):
                 return False
             else:
                 logger.error(f"❌ API 请求失败: HTTP {response.status_code}")
-                try:
-                    error_info = response.json()
-                    logger.error(f"错误详情: {error_info}")
-                except Exception:
-                    logger.error(f"响应内容: {response.text[:200]}")
                 return False
 
         except requests.exceptions.Timeout:
@@ -239,19 +231,30 @@ class BailianProvider(TranslationProvider):
             logger.error(f"❌ 测试失败: {e}")
             return False
 
-    def chat(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
-        import requests
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+class BailianProvider(TranslationProvider):
+    """阿里云百炼（DashScope）翻译 Provider"""
 
-        payload = {
-            "model": self.model,
-            "input": {
-                "messages": messages
-            },
+    def __init__(self, config: Config):
+        self.config = config
+
+    @property
+    def api_key(self) -> str:
+        return self.config.BAILIAN_API_KEY
+
+    def get_model(self) -> str:
+        return self.config.BAILIAN_MODEL
+
+    def get_name(self) -> str:
+        return "阿里云百炼"
+
+    def _get_endpoint(self) -> str:
+        return "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+
+    def _build_payload(self, messages: List[Dict], max_tokens: int, temperature: float) -> Dict:
+        return {
+            "model": self.get_model(),
+            "input": {"messages": messages},
             "parameters": {
                 "result_format": "message",
                 "max_tokens": max_tokens,
@@ -259,16 +262,12 @@ class BailianProvider(TranslationProvider):
             }
         }
 
-        response = requests.post(self.url, headers=headers, json=payload, timeout=120)
-
-        if response.status_code == 200:
-            result = response.json()
-            if "output" in result and "choices" in result["output"]:
-                return result["output"]["choices"][0]["message"]["content"]
-            elif "output" in result and "text" in result["output"]:
-                return result["output"]["text"]
-
-        raise RuntimeError(f"API 错误: HTTP {response.status_code} - {response.text[:200]}")
+    def _parse_response(self, result: Dict) -> str:
+        if "output" in result and "choices" in result["output"]:
+            return result["output"]["choices"][0]["message"]["content"]
+        elif "output" in result and "text" in result["output"]:
+            return result["output"]["text"]
+        raise RuntimeError("无法解析 API 响应")
 
 
 class OpenAICompatProvider(TranslationProvider):
@@ -277,91 +276,35 @@ class OpenAICompatProvider(TranslationProvider):
     def __init__(self, config: Config, name: str, api_key: str, model: str, base_url: str):
         self.config = config
         self._name = name
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip('/')
-        self.url = f"{self.base_url}/chat/completions"
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url.rstrip('/')
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key
 
     def get_model(self) -> str:
-        return self.model
+        return self._model
 
     def get_name(self) -> str:
         return self._name
 
-    def test_connection(self) -> bool:
-        import requests
+    def _get_endpoint(self) -> str:
+        return f"{self._base_url}/chat/completions"
 
-        logger.info(f"正在测试 {self._name} API 连通性...")
-
-        if self.api_key in ("YOUR_API_KEY_HERE", "", None):
-            logger.error(f"❌ {self._name} API Key 未设置")
-            return False
-
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "max_tokens": 10
-            }
-
-            response = requests.post(self.url, headers=headers, json=payload, timeout=30)
-
-            if response.status_code == 200:
-                logger.info(f"✅ {self._name} API 连通性测试通过")
-                return True
-            elif response.status_code == 401:
-                logger.error(f"❌ {self._name} API Key 无效或已过期 (HTTP {response.status_code})")
-                return False
-            elif response.status_code == 429:
-                logger.warning(f"⚠️ 请求过于频繁 (HTTP {response.status_code})")
-                return False
-            else:
-                logger.error(f"❌ API 请求失败: HTTP {response.status_code}")
-                try:
-                    error_info = response.json()
-                    logger.error(f"错误详情: {error_info}")
-                except Exception:
-                    logger.error(f"响应内容: {response.text[:200]}")
-                return False
-
-        except requests.exceptions.Timeout:
-            logger.error(f"❌ 请求超时，请检查网络连接")
-            return False
-        except requests.exceptions.ConnectionError:
-            logger.error(f"❌ 网络连接错误，请检查网络或代理设置")
-            return False
-        except Exception as e:
-            logger.error(f"❌ 测试失败: {e}")
-            return False
-
-    def chat(self, messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.3) -> str:
-        import requests
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": self.model,
+    def _build_payload(self, messages: List[Dict], max_tokens: int, temperature: float) -> Dict:
+        return {
+            "model": self._model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature
         }
 
-        response = requests.post(self.url, headers=headers, json=payload, timeout=120)
-
-        if response.status_code == 200:
-            result = response.json()
-            if "choices" in result and len(result["choices"]) > 0:
-                return result["choices"][0]["message"]["content"]
-
-        raise RuntimeError(f"API 错误: HTTP {response.status_code} - {response.text[:200]}")
+    def _parse_response(self, result: Dict) -> str:
+        if "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0]["message"]["content"]
+        raise RuntimeError("无法解析 API 响应")
 
 
 # ==================== 翻译缓存管理器 ====================
@@ -372,7 +315,9 @@ class TranslationCache:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._local = threading.local()
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        parent = Path(db_path).parent
+        if str(parent) and not parent.exists():
+            os.makedirs(parent, exist_ok=True)
         self._init_db()
     
     def _get_conn(self) -> sqlite3.Connection:
@@ -422,7 +367,7 @@ class TranslationCache:
             if result:
                 return result[0]
         except Exception as e:
-            logger.warning(f"缓存查询失败: {e}")
+            logger.warning(f"缓存查询失败: {e}", exc_info=True)
         return None
     
     def set(self, text: str, translated: str, model: str):
@@ -440,16 +385,15 @@ class TranslationCache:
             ''', (text_hash, text, translated, model))
             conn.commit()
         except Exception as e:
-            logger.warning(f"缓存写入失败: {e}")
+            logger.warning(f"缓存写入失败: {e}", exc_info=True)
     
     def get_stats(self) -> Dict:
         """获取缓存统计信息"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*), model FROM translations GROUP BY model")
             stats = cursor.fetchall()
-            conn.close()
             return {"total_entries": sum(s[0] for s in stats), "by_model": stats}
         except Exception as e:
             return {"error": str(e)}
@@ -482,13 +426,25 @@ def format_time(seconds: float) -> str:
 
 
 def parse_time(time_str: str) -> float:
-    """将 SRT 时间格式转换为秒数"""
+    """将时间字符串转换为秒数，支持 HH:MM:SS,mmm 和 HH:MM:SS.xx 格式"""
     time_str = time_str.replace(',', '.')
     parts = time_str.split(':')
-    hours = int(parts[0])
-    minutes = int(parts[1])
-    seconds = float(parts[2])
-    return hours * 3600 + minutes * 60 + seconds
+    if len(parts) < 2 or len(parts) > 3:
+        logger.warning(f"无效的时间格式: {time_str}")
+        return 0.0
+    try:
+        if len(parts) == 3:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds = float(parts[2])
+            return hours * 3600 + minutes * 60 + seconds
+        else:
+            minutes = int(parts[0])
+            seconds = float(parts[1])
+            return minutes * 60 + seconds
+    except (ValueError, IndexError):
+        logger.warning(f"无法解析时间: {time_str}")
+        return 0.0
 
 
 def parse_srt(srt_content: str) -> List[dict]:
@@ -539,13 +495,20 @@ def get_video_duration(video_path: str) -> float:
         'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
         video_path
     ]
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, encoding='utf-8'
+    )
+    if result.returncode != 0:
+        logger.error(f"ffprobe 获取视频时长失败: {result.stderr.strip()}")
+        raise RuntimeError(f"无法获取视频时长: {result.stderr.strip()}")
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding='utf-8'
-        )
-        return float(result.stdout.strip())
-    except:
-        return 0
+        duration = float(result.stdout.strip())
+        if duration <= 0:
+            raise ValueError(f"无效的时长: {duration}")
+        return duration
+    except ValueError:
+        logger.error(f"无法解析视频时长: {result.stdout.strip()}")
+        raise RuntimeError(f"无法解析视频时长: {result.stdout.strip()}")
 
 
 def get_video_size_gb(video_path: str) -> float:
@@ -580,24 +543,13 @@ class AudioExtractor:
         segment_duration = self.config.AUDIO_SEGMENT_MINUTES * 60
         
         if duration <= segment_duration:
-            # 短视频直接提取
             video_name = Path(video_path).stem
             audio_path = os.path.join(self.config.TEMP_DIR, f"{video_name}_audio.wav")
             logger.info(f"正在提取音频: {video_path} (时长: {duration/60:.1f}分钟)")
-            
-            cmd = [
-                'ffmpeg', '-y', '-i', video_path,
-                '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
-                audio_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
-            if result.returncode != 0:
-                raise RuntimeError(f"音频提取失败: {result.stderr}")
-            
+            self.extract_segment(video_path, 0, duration, audio_path)
             logger.info(f"音频提取完成: {audio_path}")
             return [audio_path]
         else:
-            # 长视频分段提取
             num_segments = int(duration / segment_duration) + 1
             logger.info(f"视频时长 {duration/60:.1f}分钟，将分成 {num_segments} 段处理")
             
@@ -613,8 +565,15 @@ class AudioExtractor:
                 )
                 
                 logger.info(f"提取音频段 {i+1}/{num_segments}: {start/60:.1f}min - {(start+seg_duration)/60:.1f}min")
-                self.extract_segment(video_path, start, seg_duration, output_path)
-                audio_segments.append(output_path)
+                try:
+                    self.extract_segment(video_path, start, seg_duration, output_path)
+                    audio_segments.append(output_path)
+                except Exception as e:
+                    logger.error(f"音频段 {i+1} 提取失败: {e}")
+                    for path in audio_segments:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    raise RuntimeError(f"音频提取在第 {i+1}/{num_segments} 段失败") from e
             
             return audio_segments
 
@@ -704,12 +663,6 @@ class SubtitleGenerator:
         # 写入 SRT 文件
         write_srt(all_entries, srt_path)
         logger.info(f"字幕生成完成: {srt_path} (共 {len(all_entries)} 条)")
-        
-        # 删除临时音频文件
-        for audio_path in audio_segments:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-        
         return srt_path
 
 
@@ -741,7 +694,7 @@ class SubtitleTranslator:
 
         self.model = self.provider.get_model()
 
-        if self.provider.api_key in ("YOUR_API_KEY_HERE", "", None):
+        if not self.provider.api_key or self.provider.api_key is _MISSING:
             logger.warning(f"警告: 请设置有效的 {self.provider.get_name()} API Key")
 
     def _rate_limit(self):
@@ -762,6 +715,8 @@ class SubtitleTranslator:
         if not entries:
             return []
 
+        original_entries = entries
+
         # 检查缓存
         if self.cache:
             cached_results = []
@@ -774,7 +729,7 @@ class SubtitleTranslator:
                     need_translate.append(entry)
 
             if cached_results:
-                logger.debug(f"缓存命中 {len(cached_results)}/{len(entries)} 条")
+                logger.info(f"缓存命中 {len(cached_results)}/{len(entries)} 条")
 
             if not need_translate:
                 cached_results.sort(key=lambda x: x[0])
@@ -783,7 +738,10 @@ class SubtitleTranslator:
             entries = need_translate
 
         batch_text = "\n".join([f"{e['index']}|{e['text']}" for e in entries])
-        prompt = self.config.TRANSLATION_PROMPT.format(text=batch_text)
+        prompt = self.config.TRANSLATION_PROMPT.format(
+            text=batch_text,
+            target_lang=self.config.TARGET_LANGUAGE
+        )
 
         self._rate_limit()
 
@@ -791,14 +749,14 @@ class SubtitleTranslator:
             translated_text = self.provider.chat(
                 [{"role": "user", "content": prompt}],
                 max_tokens=4000,
-                temperature=0.3
+                temperature=self.config.TRANSLATION_TEMPERATURE
             )
 
             translated_lines = [line.strip() for line in translated_text.strip().split('\n') if line.strip()]
 
             if len(translated_lines) != len(entries):
                 logger.warning(f"翻译行数不匹配: 输入{len(entries)}行，输出{len(translated_lines)}行，将使用逐条翻译")
-                return self._translate_one_by_one(entries)
+                return self._translate_one_by_one(original_entries)
 
             if self.cache:
                 for entry, translated in zip(entries, translated_lines):
@@ -813,7 +771,7 @@ class SubtitleTranslator:
 
         except Exception as e:
             logger.error(f"批量翻译失败: {e}")
-            return self._translate_one_by_one(entries)
+            return self._translate_one_by_one(original_entries)
 
     def _translate_one_by_one(self, entries: List[dict]) -> List[str]:
         """逐条翻译（备用方案）"""
@@ -839,11 +797,11 @@ class SubtitleTranslator:
         self._rate_limit()
 
         try:
-            prompt = f"将以下文本翻译成中文，只返回翻译结果:\n{text}"
+            prompt = f"将以下文本翻译成{self.config.TARGET_LANGUAGE}，只返回翻译结果:\n{text}"
             return self.provider.chat(
                 [{"role": "user", "content": prompt}],
                 max_tokens=500,
-                temperature=0.3
+                temperature=self.config.TRANSLATION_TEMPERATURE
             ).strip()
         except Exception as e:
             logger.error(f"翻译失败: {e}")
@@ -862,7 +820,7 @@ class SubtitleTranslator:
         logger.info(f"使用模型: {self.model}")
         logger.info(f"批量大小: {self.config.TRANSLATION_BATCH_SIZE} 行/次")
 
-        with open(srt_path, 'r', encoding='utf-8') as f:
+        with open(srt_path, 'r', encoding='utf-8-sig') as f:
             srt_content = f.read()
 
         entries = parse_srt(srt_content)
@@ -910,57 +868,52 @@ class VideoEmbedder:
         self.config = config
 
     def _parse_time(self, time_str: str) -> float:
-        """将时间字符串转换为秒数"""
-        # 格式: HH:MM:SS.xx 或 MM:SS.xx
-        parts = time_str.split(':')
-        if len(parts) == 3:
-            h, m, s = parts
-            return int(h) * 3600 + int(m) * 60 + float(s)
-        elif len(parts) == 2:
-            m, s = parts
-            return int(m) * 60 + float(s)
-        return 0.0
+        """将 FFmpeg 进度时间字符串转换为秒数"""
+        return parse_time(time_str)
 
     def embed(self, video_path: str, srt_path: str, output_path: str):
         """将字幕硬嵌入视频（带进度条）"""
         video_size_gb = get_video_size_gb(video_path)
         duration = get_video_duration(video_path)
-        
+        start_time = time.time()
+
         logger.info(f"开始嵌入字幕到视频")
         logger.info(f"输入视频: {video_path} ({video_size_gb:.2f} GB, {duration:.1f}秒)")
         logger.info(f"字幕文件: {srt_path}")
         logger.info(f"输出视频: {output_path}")
-        
+
         # 转义字幕路径（FFmpeg 滤镜语法要求）
         srt_path_escaped = srt_path.replace('\\', '/').replace(':', '\\:')
-        
+
         subtitle_filter = (
-            f"subtitles={srt_path_escaped}:"
+            f"subtitles='{srt_path_escaped}':"
             f"force_style='{self.config.SUBTITLE_STYLE},MarginV={self.config.SUBTITLE_MARGIN_V}'"
         )
-        
+
         cmd = [
             'ffmpeg', '-y', '-progress', 'pipe:1', '-i', video_path,
             '-vf', subtitle_filter,
             '-c:v', self.config.VIDEO_CODEC,
         ]
-        
+
         # 根据编码器设置参数
         if self.config.VIDEO_CODEC == 'h264_nvenc':
             cmd.extend(['-preset', 'medium', '-cq', str(self.config.VIDEO_CRF)])
         elif self.config.VIDEO_CODEC == 'libx264':
             cmd.extend(['-preset', 'medium', '-crf', str(self.config.VIDEO_CRF)])
-        
+        else:
+            logger.warning(f"未识别的视频编码器: {self.config.VIDEO_CODEC}，将使用默认参数")
+            cmd.extend(['-preset', 'medium', '-crf', str(self.config.VIDEO_CRF)])
+
         cmd.extend([
             '-c:a', self.config.AUDIO_CODEC,
             '-b:a', self.config.AUDIO_BITRATE,
         ])
-        
+
         cmd.append(output_path)
-        
+
         logger.info("正在编码视频，这可能需要一些时间...")
-        
-        # 使用 Popen 实时获取进度
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -968,39 +921,33 @@ class VideoEmbedder:
             text=True,
             encoding='utf-8',
             errors='ignore',
-            bufsize=1,  # 行缓冲
-            universal_newlines=True
+            bufsize=1,
         )
-        
-        # 解析进度输出
+
         current_time = 0.0
-        last_log_time = 0
-        last_progress_log = 0  # 上次记录进度的时间戳
-        stderr_lines = []  # 收集 stderr 用于出错时排查
-        
+        last_progress_log = 0
+        stderr_lines = []
+
         def read_stderr():
-            """后台读取 stderr"""
             while process.poll() is None:
                 line = process.stderr.readline()
                 if line:
                     stderr_lines.append(line)
-        
-        import threading
+
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
         stderr_thread.start()
-        
+
         try:
             while True:
                 line = process.stdout.readline()
                 if not line:
-                    # 检查进程是否结束
                     if process.poll() is not None:
                         break
+                    time.sleep(0.1)
                     continue
-                
+
                 line = line.strip()
-                
-                # 解析 FFmpeg 进度输出
+
                 if line.startswith('out_time_ms='):
                     try:
                         current_time = int(line.split('=')[1]) / 1000000.0
@@ -1013,32 +960,30 @@ class VideoEmbedder:
                             current_time = self._parse_time(time_str)
                     except (ValueError, IndexError):
                         continue
-                
-                # 每 5 秒输出一次进度（基于实际时间而非视频时间）
+
                 current_timestamp = time.time()
                 if duration > 0 and (current_timestamp - last_progress_log) >= 5:
                     progress = min(100.0, (current_time / duration) * 100)
                     logger.info(f"编码进度: {progress:.1f}% ({current_time:.1f}s / {duration:.1f}s)")
                     last_progress_log = current_timestamp
-                    last_log_time = int(current_time)
-            
-            # 等待进程完成
+
             process.wait()
             stderr_thread.join(timeout=2)
-            
+
             if process.returncode != 0:
-                stderr_output = ''.join(stderr_lines[-20:])  # 最后20行
+                stderr_output = ''.join(stderr_lines[-20:])
                 if stderr_output.strip():
                     logger.error(f"FFmpeg 错误输出:\n{stderr_output.strip()}")
                 raise RuntimeError(f"视频编码失败 (exit code: {process.returncode})")
-            
-            logger.info(f"视频嵌入完成: {output_path}")
-            
+
+            elapsed = time.time() - start_time
+            logger.info(f"视频嵌入完成: {output_path} (耗时: {elapsed:.1f}秒)")
+
         except KeyboardInterrupt:
             process.terminate()
             try:
                 process.wait(timeout=5)
-            except:
+            except Exception:
                 process.kill()
             raise RuntimeError("用户中断视频编码")
 
@@ -1118,13 +1063,12 @@ class VideoSubtitlePipeline:
             
             # 检查字幕是否为空
             if srt_path and os.path.exists(srt_path):
-                with open(srt_path, 'r', encoding='utf-8') as f:
+                with open(srt_path, 'r', encoding='utf-8-sig') as f:
                     srt_content = f.read().strip()
                 if not srt_content:
                     logger.warning("未识别到任何字幕，直接复制原视频")
                     if not skip_embedding:
                         # 复制原视频到输出路径
-                        import shutil
                         shutil.copy2(video_path, output_path)
                         logger.info(f"原视频已复制到: {output_path}")
                     result['success'] = True
@@ -1176,20 +1120,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 完整流程
+  # 完整流程（默认百炼平台）
   python video_subtitle.py input.mp4
-  
+
+  # 使用 DeepSeek 翻译
+  python video_subtitle.py input.mp4 --provider deepseek
+
   # 测试 API 连通性
-  python video_subtitle.py --test-api
-  
-  # 指定音频分段长度（长音频转录）
+  python video_subtitle.py --test-api --provider siliconflow
+
+  # 指定音频分段长度
   python video_subtitle.py input.mp4 --audio-segment 20
-  
+
   # 调整翻译批量大小
   python video_subtitle.py input.mp4 --batch-size 50
-  
+
   # 跳过翻译（使用原始语言字幕）
   python video_subtitle.py input.mp4 --skip-translation
+
+  # CPU 模式
+  python video_subtitle.py input.mp4 --device cpu
+
+  # 翻译为英文
+  python video_subtitle.py input.mp4 --target-language English
         """
     )
     
@@ -1202,12 +1155,14 @@ def main():
     parser.add_argument('--skip-embedding', action='store_true',
                         help='跳过嵌入字幕')
     parser.add_argument('--model', default='large-v3',
-                        choices=['tiny', 'base', 'small', 'medium', 'large-v1', 'large-v2', 'large-v3'],
+                        choices=['tiny', 'base', 'small', 'medium', 'turbo', 'large-v1', 'large-v2', 'large-v3'],
                         help='Whisper 模型大小（默认: large-v3）')
     parser.add_argument('--device', default='cuda',
                         choices=['cuda', 'cpu'],
                         help='计算设备（默认: cuda）')
     parser.add_argument('--language', help='源语言代码（默认自动检测）')
+    parser.add_argument('--target-language', default='中文',
+                        help='目标翻译语言（默认: 中文）')
     parser.add_argument('--audio-segment', type=int, default=30,
                         help='音频分段长度（分钟，默认: 30）')
     parser.add_argument('--batch-size', type=int, default=30,
@@ -1237,13 +1192,14 @@ def main():
     
     # 检查 ffmpeg
     if not check_ffmpeg():
-        print("错误: 未检测到 ffmpeg，请先安装: https://ffmpeg.org/download.html")
+        logger.error("未检测到 ffmpeg，请先安装: https://ffmpeg.org/download.html")
         sys.exit(1)
     config.WHISPER_MODEL = args.model
     config.DEVICE = args.device
     config.AUDIO_SEGMENT_MINUTES = args.audio_segment
     config.TRANSLATION_BATCH_SIZE = args.batch_size
     config.TRANSLATION_PROVIDER = args.provider
+    config.TARGET_LANGUAGE = args.target_language
     config.ENABLE_CACHE = not args.no_cache
     if args.language:
         config.SOURCE_LANGUAGE = args.language
@@ -1282,16 +1238,16 @@ def main():
         )
         
         if result['success']:
-            print("\n" + "=" * 50)
-            print("处理成功！")
-            print(f"原始字幕: {result.get('original_srt', 'N/A')}")
-            print(f"翻译字幕: {result.get('translated_srt', 'N/A')}")
+            logger.info("=" * 50)
+            logger.info("处理成功！")
+            logger.info(f"原始字幕: {result.get('original_srt', 'N/A')}")
+            logger.info(f"翻译字幕: {result.get('translated_srt', 'N/A')}")
             if not args.skip_embedding:
-                print(f"输出视频: {result['output_path']}")
-            print("=" * 50)
+                logger.info(f"输出视频: {result['output_path']}")
+            logger.info("=" * 50)
             
     except Exception as e:
-        print(f"\n处理失败: {e}")
+        logger.error(f"处理失败: {e}", exc_info=True)
         sys.exit(1)
 
 
